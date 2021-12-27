@@ -1,51 +1,91 @@
 # thumbnail_maker.py
 import time
+import rich
+import re
 import os
 import logging
+from tqdm import tqdm
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
+from pathlib import Path
+import numpy as np
 
 import PIL
 from PIL import Image
 
-logging.basicConfig(filename='logfile.log', level=logging.DEBUG)
+from functools import wraps
+from typing import Any, Callable, List
+
+import logging
+
+from rich.logging import RichHandler
+
+logger = logging.getLogger(__name__)
+shell_handler = RichHandler()
+
+logger.setLevel(logging.DEBUG)
+shell_handler.setLevel(logging.DEBUG)
+
+# the formatter determines how the logger looks like
+FMT_SHELL = "%(message)s"
+FMT_FILE = """%(levelname)s %(asctime)s [%(filename)s
+    %(funcName)s %(lineno)d] %(message)s"""
+
+shell_formatter = logging.Formatter(FMT_SHELL)
+shell_handler.setFormatter(shell_formatter)
+logger.addHandler(shell_handler)
+
+def timeit(func: Callable) -> Callable:
+    @wraps(func)
+    def timed_func(*args, **kwargs) -> Any:
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        logger.info(f"Executed {func.__name__} in {end_time-start_time:.3f}")
+        return result
+    
+    return timed_func
 
 class ThumbnailMakerService(object):
-    def __init__(self, home_dir='.'):
-        self.home_dir = home_dir
-        self.input_dir = self.home_dir + os.path.sep + 'incoming'
-        self.output_dir = self.home_dir + os.path.sep + 'outgoing'
+    def __init__(self, home_dir:str='.') -> None:
+        self.home_dir = Path(home_dir)
+        self.input_dir:Path = self.home_dir/'incoming'
+        self.output_dir:Path = self.home_dir/'outgoing'
 
-    def download_images(self, img_url_list):
+    @timeit
+    def get_images(self, img_list: List[str]):
         # validate inputs
-        if not img_url_list:
+        if not img_list:
             return
-        os.makedirs(self.input_dir, exist_ok=True)
+        self.input_dir.mkdir(parents=True, exist_ok=True)
         
-        logging.info("beginning image downloads")
+        pbar = tqdm(img_list, leave=True)
+        for img_loc in pbar:
+            pbar.set_description(desc=Path(img_loc).name)
+            if not (self.input_dir/Path(img_loc).name).exists:
+                if re.search(pattern='https', string=img_loc):
+                    img_filename = urlparse(img_loc).path.split('/')[-1]
+                    urlretrieve(img_loc, self.input_dir/img_filename)
 
-        start = time.perf_counter()
-        for url in img_url_list:
-            # download each image and save to the input dir 
-            img_filename = urlparse(url).path.split('/')[-1]
-            urlretrieve(url, self.input_dir + os.path.sep + img_filename)
-        end = time.perf_counter()
+        logger.info(f"Image : {len(list(self.input_dir.glob('*')))} already present")
 
-        logging.info("downloaded {} images in {} seconds".format(len(img_url_list), end - start))
 
-    def perform_resizing(self):
+    @timeit
+    def perform_resizing(self) -> None:
         # validate inputs
-        if not os.listdir(self.input_dir):
+        if not self.input_dir.exists():
+            logger.info("Input directory missing ..")
             return
-        os.makedirs(self.output_dir, exist_ok=True)
+            
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        logging.info("beginning image resizing")
         target_sizes = [32, 64, 200]
-        num_images = len(os.listdir(self.input_dir))
+        img_files = self.input_dir.glob("*")
 
-        start = time.perf_counter()
-        for filename in os.listdir(self.input_dir):
-            orig_img = Image.open(self.input_dir + os.path.sep + filename)
+        for filename in tqdm(img_files):
+            print(f"file name: {str(filename)}")
+            orig_img = Image.open(filename)
+            logger.info(F"{filename.name}: {np.asarray(orig_img).shape}")
             for basewidth in target_sizes:
                 img = orig_img
                 # calculate target height of the resized image to maintain the aspect ratio
@@ -55,22 +95,11 @@ class ThumbnailMakerService(object):
                 img = img.resize((basewidth, hsize), PIL.Image.LANCZOS)
                 
                 # save the resized image to the output dir with a modified file name 
-                new_filename = os.path.splitext(filename)[0] + \
-                    '_' + str(basewidth) + os.path.splitext(filename)[1]
-                img.save(self.output_dir + os.path.sep + new_filename)
+                new_filename = self.output_dir/f"{filename.stem}_{str(basewidth)}{filename.suffix}"
+                img.save(new_filename)
 
-            os.remove(self.input_dir + os.path.sep + filename)
-        end = time.perf_counter()
+    @timeit
+    def make_thumbnails(self, img_url_list: List[str]) -> None:
 
-        logging.info("created {} thumbnails in {} seconds".format(num_images, end - start))
-
-    def make_thumbnails(self, img_url_list):
-        logging.info("START make_thumbnails")
-        start = time.perf_counter()
-
-        self.download_images(img_url_list)
+        self.get_images(img_url_list)
         self.perform_resizing()
-
-        end = time.perf_counter()
-        logging.info("END make_thumbnails in {} seconds".format(end - start))
-    
